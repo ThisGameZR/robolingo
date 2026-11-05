@@ -26,6 +26,7 @@ type Message = {
   stickerId: string | null;
   status: "received" | "sent" | "failed";
   delivery: "reply" | "push" | null;
+  unsentAt: string | null;
   error: string | null;
   createdAt: string;
   /** Client-only: message shown before the server confirms it. */
@@ -227,6 +228,7 @@ function Conversation({
   const [sendError, setSendError] = useState<string | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const lastCountRef = useRef(0);
+  const lastTypingRef = useRef(0);
   const userId = contact.userId;
 
   const loadMessages = useCallback(async () => {
@@ -275,6 +277,7 @@ function Conversation({
       stickerId: null,
       status: "sent",
       delivery: null,
+      unsentAt: null,
       error: null,
       createdAt: new Date().toISOString(),
       pending: true,
@@ -369,7 +372,18 @@ function Conversation({
           <textarea
             rows={1}
             value={draft}
-            onChange={(e) => setDraft(e.target.value)}
+            onChange={(e) => {
+              setDraft(e.target.value);
+              // Show LINE's "..." to the user while we type. The animation lasts
+              // 20s, so re-sending at most every 15s keeps it up without spamming.
+              const now = Date.now();
+              if (e.target.value.trim() && now - lastTypingRef.current > 15_000) {
+                lastTypingRef.current = now;
+                void fetch(`/api/contacts/${encodeURIComponent(userId)}/typing`, {
+                  method: "POST",
+                }).catch(() => {});
+              }
+            }}
             onKeyDown={(e) => {
               if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
                 e.preventDefault();
@@ -438,6 +452,14 @@ function MessageBody({ message: m, out }: { message: Message; out: boolean }) {
       ? `rounded-br-md ${m.status === "failed" ? "bg-red-100 text-red-900" : "bg-[#06C755] text-white"} ${m.pending ? "opacity-60" : ""}`
       : "rounded-bl-md bg-white text-slate-900"
   }`;
+
+  if (m.unsentAt) {
+    return (
+      <div className="rounded-2xl border border-dashed border-slate-300 px-3 py-2 text-sm italic text-slate-400">
+        Message unsent
+      </div>
+    );
+  }
 
   if (m.type === "text") return <div className={bubble}>{m.text}</div>;
 

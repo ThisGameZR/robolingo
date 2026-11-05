@@ -24,6 +24,7 @@ function omit<T extends object, K extends keyof T>(obj: T, keys: readonly K[]): 
 const publicContactColumns = omit(getTableColumns(contacts), [
   "replyToken",
   "replyTokenReceivedAt",
+  "markAsReadToken",
 ]);
 
 export async function listContacts() {
@@ -58,12 +59,46 @@ export async function listMessages(userId: string, limit = 200) {
   return rows.reverse();
 }
 
+/**
+ * Clears the unread badge and shows "Read" to the LINE user.
+ * The read token is taken atomically so it's only sent to LINE once.
+ */
 export async function markRead(userId: string) {
   const db = await getDb();
-  await db
-    .update(contacts)
-    .set({ unreadCount: 0 })
-    .where(eq(contacts.userId, userId));
+  const res = await db.execute<{ mark_as_read_token: string | null }>(sql`
+    with old as (
+      select ${contacts.userId}, ${contacts.markAsReadToken}
+      from ${contacts}
+      where ${contacts.userId} = ${userId}
+      for update
+    )
+    update ${contacts}
+    set unread_count = 0, mark_as_read_token = null
+    from old
+    where ${contacts.userId} = old.user_id
+    returning old.mark_as_read_token
+  `);
+
+  const token = res.rows[0]?.mark_as_read_token;
+  if (!token) return;
+  try {
+    await lineClient().markMessagesAsReadByToken({ markAsReadToken: token });
+  } catch (err) {
+    // A missing read receipt isn't worth failing the request over.
+    console.warn(`[line] markAsRead(${userId}) failed:`, describeLineError(err));
+  }
+}
+
+/**
+ * Shows LINE's "..." typing animation in the user's chat while an operator types.
+ * It disappears when our message arrives or after `seconds` (5–60, step 5).
+ */
+export async function showTyping(userId: string, seconds = 20) {
+  try {
+    await lineClient().showLoadingAnimation({ chatId: userId, loadingSeconds: seconds });
+  } catch (err) {
+    console.warn(`[line] showLoadingAnimation(${userId}) failed:`, describeLineError(err));
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -202,9 +237,29 @@ export async function handleWebhookEvent(event: webhook.Event) {
       await upsertContact(userId);
       await saveIncomingMessage(userId, event);
       return;
+    case "unsend":
+      await markUnsent(userId, event.unsend.messageId, at);
+      return;
     default:
       return;
   }
+}
+
+/** The user unsent a message: drop its content, like LINE's own apps do. */
+async function markUnsent(userId: string, lineMessageId: string, at: Date) {
+  const db = await getDb();
+  const [msg] = await db
+    .update(messages)
+    .set({ unsentAt: at, text: null, stickerPackageId: null, stickerId: null })
+    .where(and(eq(messages.userId, userId), eq(messages.lineMessageId, lineMessageId)))
+    .returning({ createdAt: messages.createdAt });
+  if (!msg) return;
+
+  // If it was the conversation's latest message, update the list preview too.
+  await db
+    .update(contacts)
+    .set({ lastMessagePreview: "Message unsent" })
+    .where(and(eq(contacts.userId, userId), eq(contacts.lastMessageAt, msg.createdAt)));
 }
 
 async function upsertContact(userId: string, opts: { forceProfile?: boolean } = {}) {
@@ -322,7 +377,10 @@ async function saveIncomingMessage(userId: string, event: webhook.MessageEvent) 
       ? event.replyToken
       : null;
 
-  // Don't move "last message" (or the reply token) backwards if events arrive out of order.
+  const markAsReadToken =
+    "markAsReadToken" in m && typeof m.markAsReadToken === "string" ? m.markAsReadToken : null;
+
+  // Don't move "last message" (or the tokens) backwards if events arrive out of order.
   const isNewest = sql`(${contacts.lastMessageAt} is null or ${contacts.lastMessageAt} <= ${createdAt.toISOString()}::timestamptz)`;
   await db
     .update(contacts)
@@ -333,6 +391,9 @@ async function saveIncomingMessage(userId: string, event: webhook.MessageEvent) 
       ...(replyToken && {
         replyToken: sql`case when ${isNewest} then ${replyToken} else ${contacts.replyToken} end`,
         replyTokenReceivedAt: sql`case when ${isNewest} then now() else ${contacts.replyTokenReceivedAt} end`,
+      }),
+      ...(markAsReadToken && {
+        markAsReadToken: sql`case when ${isNewest} then ${markAsReadToken} else ${contacts.markAsReadToken} end`,
       }),
     })
     .where(eq(contacts.userId, userId));

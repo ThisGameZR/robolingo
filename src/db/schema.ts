@@ -29,6 +29,11 @@ export const contacts = pgTable("contacts", {
    */
   replyToken: text("reply_token"),
   replyTokenReceivedAt: timestamp("reply_token_received_at", { withTimezone: true }),
+  /**
+   * Read token from the newest message. Marking it as read also marks every
+   * earlier message, so only the latest one is kept.
+   */
+  markAsReadToken: text("mark_as_read_token"),
   createdAt: timestamp("created_at", { withTimezone: true })
     .notNull()
     .defaultNow(),
@@ -58,6 +63,8 @@ export const messages = pgTable(
     /** Outgoing only: which LINE API delivered it. "reply" is free, "push" uses quota. */
     delivery: text("delivery", { enum: ["reply", "push"] }),
     error: text("error"),
+    /** Set when the LINE user unsends the message; its content is then cleared. */
+    unsentAt: timestamp("unsent_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),

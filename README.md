@@ -46,7 +46,7 @@ pnpm dev
 
 Then open http://localhost:3000.
 
-- No database setup is needed locally. Without `DATABASE_URL`, the app uses an embedded Postgres (PGlite) stored in `./.pglite`.
+- No database setup is needed locally. Without `DATABASE_URL`, the app uses an embedded Postgres (PGlite) stored in `node_modules/.cache/robolingo-pglite` (delete that folder to reset local data).
 - Without `APP_PASSWORD`, the login screen is skipped locally.
 - LINE can't reach `localhost`. To receive real LINE messages locally, expose port 3000 with a tunnel (`ngrok http 3000` or `cloudflared tunnel --url http://localhost:3000`) and set the tunnel URL plus `/api/line/webhook` as the webhook URL.
 

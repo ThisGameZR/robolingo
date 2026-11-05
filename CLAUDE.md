@@ -9,7 +9,7 @@ Requirements from the brief: Next.js + TypeScript, send to and receive from the 
 ## Stack
 - Next.js 16 App Router (`cacheComponents` on), React 19, TypeScript, Tailwind v4, pnpm
 - `@line/bot-sdk` v11 (`messagingApi.MessagingApiClient`, `validateSignature`, `webhook.*` types)
-- Drizzle ORM. Production uses Neon over HTTP (`DATABASE_URL`). Local dev without `DATABASE_URL` uses PGlite in `./.pglite`, with migrations applied automatically.
+- Drizzle ORM. Production uses Neon over HTTP (`DATABASE_URL`). Local dev without `DATABASE_URL` uses PGlite in `node_modules/.cache/robolingo-pglite` (kept out of the source tree so the Turbopack watcher does not stall), with migrations applied automatically.
 
 ## Layout
 - `src/app/api/line/webhook/route.ts`: LINE webhook (signature check, then `handleWebhookEvent`)

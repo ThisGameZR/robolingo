@@ -1,4 +1,5 @@
 import "server-only";
+import { mkdirSync } from "node:fs";
 import path from "node:path";
 import { neon } from "@neondatabase/serverless";
 import { drizzle as drizzleNeon, type NeonHttpDatabase } from "drizzle-orm/neon-http";
@@ -13,10 +14,14 @@ let dbPromise: Promise<Db> | undefined;
  * HTTP driver, which suits serverless functions.
  *
  * Local dev without DATABASE_URL: an embedded Postgres (PGlite) stored in
- * ./.pglite, with migrations applied on first use. No setup needed.
+ * node_modules/.cache/robolingo-pglite, with migrations applied on first use.
+ * No setup needed. Delete that folder to reset local data.
  */
 export function getDb(): Promise<Db> {
-  dbPromise ??= createDb();
+  dbPromise ??= createDb().catch((err) => {
+    dbPromise = undefined; // don't cache a failed start-up; retry on the next request
+    throw err;
+  });
   return dbPromise;
 }
 
@@ -36,7 +41,13 @@ async function createDb(): Promise<Db> {
   const { drizzle } = await import("drizzle-orm/pglite");
   const { migrate } = await import("drizzle-orm/pglite/migrator");
 
-  const client = new PGlite(path.join(process.cwd(), ".pglite"));
+  // Kept under node_modules/.cache: a data folder inside the source tree makes
+  // Turbopack's file watcher stall on every database write in `next dev`.
+  const dataDir =
+    process.env.PGLITE_DIR ||
+    path.join(process.cwd(), "node_modules", ".cache", "robolingo-pglite");
+  mkdirSync(dataDir, { recursive: true }); // PGlite won't create parent folders
+  const client = new PGlite(dataDir);
   const db = drizzle(client, { schema });
   await migrate(db, { migrationsFolder: path.join(process.cwd(), "drizzle") });
   // Both drivers expose the same query builder API.

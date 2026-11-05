@@ -2,6 +2,15 @@
 
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  FILE_ACCEPT,
+  MAX_FILE_BYTES,
+  formatBytes,
+  isImage,
+  prepareImage,
+  safeName,
+  uploadToBlob,
+} from "@/lib/attachments-client";
 
 // JSON shapes returned by the API (dates arrive as ISO strings).
 type Contact = {
@@ -27,6 +36,11 @@ type Message = {
   status: "received" | "sent" | "failed";
   delivery: "reply" | "push" | null;
   unsentAt: string | null;
+  mediaUrl: string | null;
+  previewUrl: string | null;
+  fileSize: number | null;
+  /** Client-only: upload progress (0–100) while an attachment is uploading. */
+  progress?: number;
   error: string | null;
   createdAt: string;
   /** Client-only: message shown before the server confirms it. */
@@ -260,53 +274,120 @@ function Conversation({
     }
   }, [all.length]);
 
-  async function send() {
-    const text = draft.trim();
-    if (!text) return;
-    setDraft("");
-    setSendError(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
+  function addTemp(partial: Partial<Message>): Message {
     const temp: Message = {
-      id: -Date.now(),
+      id: -Date.now() - Math.random(),
       userId,
       direction: "out",
       type: "text",
-      text,
+      text: null,
       lineMessageId: null,
       stickerPackageId: null,
       stickerId: null,
+      mediaUrl: null,
+      previewUrl: null,
+      fileSize: null,
       status: "sent",
       delivery: null,
       unsentAt: null,
       error: null,
       createdAt: new Date().toISOString(),
       pending: true,
+      ...partial,
     };
     setPending((p) => [...p, temp]);
+    return temp;
+  }
 
+  const updateTemp = (id: number, patch: Partial<Message>) =>
+    setPending((p) => p.map((m) => (m.id === id ? { ...m, ...patch } : m)));
+  const removeTemp = (id: number) => setPending((p) => p.filter((m) => m.id !== id));
+
+  /** POSTs a message. Returns false if nothing was saved (so the caller can restore input). */
+  async function postMessage(payload: Record<string, unknown>): Promise<boolean> {
+    const res = await fetch(`/api/contacts/${encodeURIComponent(userId)}/messages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (onUnauthorized(res)) return false;
+    const data = (await res.json().catch(() => ({}))) as { message?: Message; error?: string };
+    if (!res.ok) {
+      setSendError(data.message?.error ?? data.error ?? `Send failed (HTTP ${res.status})`);
+    }
+    await loadMessages();
+    onChanged();
+    return Boolean(data.message);
+  }
+
+  async function send() {
+    const text = draft.trim();
+    if (!text) return;
+    setDraft("");
+    setSendError(null);
+    const temp = addTemp({ type: "text", text });
     try {
-      const res = await fetch(`/api/contacts/${encodeURIComponent(userId)}/messages`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text }),
-      });
-      if (onUnauthorized(res)) return;
-      const data = (await res.json().catch(() => ({}))) as {
-        message?: Message;
-        error?: string;
-      };
-      if (!res.ok) {
-        setSendError(data.message?.error ?? data.error ?? `Send failed (HTTP ${res.status})`);
-        if (!data.message) setDraft(text); // not saved at all: give the text back
-      }
-      await loadMessages();
-      onChanged();
+      if (!(await postMessage({ text }))) setDraft(text); // not saved at all: give the text back
     } catch {
       setSendError("Network error, message not sent");
       setDraft(text);
     } finally {
-      setPending((p) => p.filter((m) => m.id !== temp.id));
+      removeTemp(temp.id);
     }
+  }
+
+  async function sendAttachment(file: File) {
+    setSendError(null);
+    const image = isImage(file);
+    if (file.size === 0) {
+      setSendError(`${file.name} is empty`); // an empty upload never completes
+      return;
+    }
+    if (!image && file.size > MAX_FILE_BYTES) {
+      setSendError(`${file.name} is larger than ${formatBytes(MAX_FILE_BYTES)}`);
+      return;
+    }
+    const localUrl = image ? URL.createObjectURL(file) : null;
+    const temp = addTemp(
+      image
+        ? { type: "image", mediaUrl: localUrl, progress: 0 }
+        : { type: "file", text: file.name, fileSize: file.size, progress: 0 },
+    );
+    const onProgress = (percent: number) => updateTemp(temp.id, { progress: percent });
+
+    try {
+      if (image) {
+        const { original, preview } = await prepareImage(file);
+        const name = safeName(file.name.replace(/\.\w+$/, ".jpg"), ".jpg");
+        const [url, previewUrl] = await Promise.all([
+          uploadToBlob(name, original, "image", "image/jpeg", onProgress),
+          uploadToBlob(name.replace(/\.jpg$/, "-preview.jpg"), preview, "preview", "image/jpeg"),
+        ]);
+        await postMessage({ type: "image", url, previewUrl });
+      } else {
+        const url = await uploadToBlob(
+          safeName(file.name),
+          file,
+          "file",
+          file.type || "application/octet-stream",
+          onProgress,
+        );
+        await postMessage({ type: "file", url, fileName: file.name, fileSize: file.size });
+      }
+    } catch (err) {
+      setSendError(
+        `Couldn't send ${file.name}: ${err instanceof Error ? err.message : "upload failed"}`,
+      );
+    } finally {
+      removeTemp(temp.id);
+      if (localUrl) URL.revokeObjectURL(localUrl);
+    }
+  }
+
+  async function sendAttachments(files: Iterable<File>) {
+    for (const file of files) await sendAttachment(file); // in order, one at a time
   }
 
   return (
@@ -369,7 +450,44 @@ function Conversation({
             void send();
           }}
         >
+          <input
+            ref={fileInputRef}
+            type="file"
+            multiple
+            accept={FILE_ACCEPT}
+            className="hidden"
+            onChange={(e) => {
+              const files = Array.from(e.target.files ?? []);
+              e.target.value = ""; // allow picking the same file again
+              void sendAttachments(files);
+            }}
+          />
+          <button
+            type="button"
+            onClick={() => fileInputRef.current?.click()}
+            className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl text-slate-500 transition hover:bg-slate-100 hover:text-slate-800"
+            aria-label="Attach image or file"
+            title="Send an image or file"
+          >
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden>
+              <path
+                d="m21 11.5-8.6 8.6a5.5 5.5 0 0 1-7.8-7.8l8.6-8.6a3.7 3.7 0 0 1 5.2 5.2l-8.6 8.6a1.8 1.8 0 0 1-2.6-2.6l7.9-7.9"
+                stroke="currentColor"
+                strokeWidth="1.8"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            </svg>
+          </button>
           <textarea
+            onPaste={(e) => {
+              // Pasting a screenshot sends it as an image.
+              const files = Array.from(e.clipboardData.files).filter(isImage);
+              if (files.length > 0) {
+                e.preventDefault();
+                void sendAttachments(files);
+              }
+            }}
             rows={1}
             value={draft}
             onChange={(e) => {
@@ -402,7 +520,9 @@ function Conversation({
             Send
           </button>
         </form>
-        <p className="mt-1 text-[11px] text-slate-400">Enter to send · Shift+Enter for a new line</p>
+        <p className="mt-1 text-[11px] text-slate-400">
+          Enter to send · Shift+Enter for a new line · 📎 or paste to send images and files
+        </p>
       </footer>
     </>
   );
@@ -418,7 +538,9 @@ function Bubble({ message: m, contact }: { message: Message; contact: Contact })
       <div className={`flex max-w-[75%] flex-col ${out ? "items-end" : "items-start"}`}>
         <MessageBody message={m} out={out} />
         <span className="mt-0.5 px-1 text-[11px] text-slate-500">
-          {m.pending ? "Sending…" : m.status === "failed" ? (
+          {m.pending ? (
+            m.progress !== undefined && m.progress < 100 ? `Uploading ${Math.round(m.progress)}%` : "Sending…"
+          ) : m.status === "failed" ? (
             <span className="text-red-600" title={m.error ?? undefined}>
               Not delivered{m.error ? `: ${m.error}` : ""}
             </span>
@@ -472,6 +594,41 @@ function MessageBody({ message: m, out }: { message: Message; out: boolean }) {
         className="h-28 w-28 object-contain"
         loading="lazy"
       />
+    );
+  }
+
+  // Media we sent lives in our Blob store (checked first: sent messages also
+  // get a LINE message id, but their content can't be downloaded from LINE).
+  if (m.type === "image" && m.mediaUrl) {
+    return (
+      <a href={m.mediaUrl} target="_blank" rel="noreferrer" className="relative block">
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img
+          src={m.mediaUrl}
+          alt="Image sent to user"
+          className={`max-h-72 rounded-2xl shadow-sm ${m.pending ? "opacity-60" : ""}`}
+          loading="lazy"
+        />
+        {m.status === "failed" && (
+          <span className="absolute inset-0 rounded-2xl ring-2 ring-red-500" aria-hidden />
+        )}
+      </a>
+    );
+  }
+
+  if (m.type === "file" && out) {
+    const label = (
+      <>
+        <span aria-hidden>📎</span> <span className="underline">{m.text ?? "File"}</span>
+        {m.fileSize != null && <span className="opacity-80"> · {formatBytes(m.fileSize)}</span>}
+      </>
+    );
+    return m.mediaUrl && !m.pending ? (
+      <a href={m.mediaUrl} target="_blank" rel="noreferrer" className={bubble}>
+        {label}
+      </a>
+    ) : (
+      <div className={bubble}>{label}</div>
     );
   }
 

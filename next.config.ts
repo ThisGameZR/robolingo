@@ -6,16 +6,17 @@ const isDev = process.env.NODE_ENV === "development";
  * CSP without nonces, so the app shell can stay statically prerendered.
  * Nonces would force every page to render dynamically. The remaining XSS
  * surface is small: message text is rendered through React (escaped), and the
- * app never injects raw HTML. Images are limited to our origin and LINE's CDN
- * (profile pictures, stickers).
+ * app never injects raw HTML. Images are limited to our origin, LINE's CDN
+ * (profile pictures, stickers) and our Blob store (images we send).
  */
 const csp = [
   "default-src 'self'",
   `script-src 'self' 'unsafe-inline'${isDev ? " 'unsafe-eval'" : ""}`,
   "style-src 'self' 'unsafe-inline'",
-  "img-src 'self' blob: data: https://*.line-scdn.net",
+  "img-src 'self' blob: data: https://*.line-scdn.net https://*.public.blob.vercel-storage.com",
   "font-src 'self'",
-  `connect-src 'self'${isDev ? " ws:" : ""}`,
+  // Attachments upload straight from the browser to Vercel Blob.
+  `connect-src 'self' https://vercel.com https://*.blob.vercel-storage.com${isDev ? " ws:" : ""}`,
   "object-src 'none'",
   "base-uri 'self'",
   "form-action 'self'",

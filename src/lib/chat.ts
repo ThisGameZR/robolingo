@@ -4,6 +4,7 @@ import { and, desc, eq, getTableColumns, isNull, lte, or, sql } from "drizzle-or
 import type { messagingApi, webhook } from "@line/bot-sdk";
 import { getDb, schema } from "@/db";
 import { describeLineError, lineClient, lineErrorStatus } from "./line";
+import { formatBytes } from "./media";
 
 const { contacts, messages } = schema;
 
@@ -114,18 +115,54 @@ const REPLY_TOKEN_TTL_SECONDS = 50;
 /** LINE stops honouring reply tokens 20 minutes after the event, even on redelivery. */
 const REPLY_TOKEN_MAX_EVENT_AGE_MS = 20 * 60 * 1000;
 
+/** What the operator can send. URLs must already be validated (see lib/media.ts). */
+export type OutgoingContent =
+  | { type: "text"; text: string }
+  | { type: "image"; url: string; previewUrl: string }
+  | { type: "file"; url: string; fileName: string; fileSize: number };
+
+export function sendText(userId: string, text: string) {
+  return sendMessage(userId, { type: "text", text });
+}
+
+/** How each kind of content goes out to LINE, and how we store it. */
+function toLine(content: OutgoingContent): {
+  line: messagingApi.Message;
+  row: { type: string; text: string | null; mediaUrl?: string; previewUrl?: string; fileSize?: number };
+} {
+  switch (content.type) {
+    case "text":
+      return { line: { type: "text", text: content.text }, row: { type: "text", text: content.text } };
+    case "image":
+      return {
+        line: { type: "image", originalContentUrl: content.url, previewImageUrl: content.previewUrl },
+        row: { type: "image", text: null, mediaUrl: content.url, previewUrl: content.previewUrl },
+      };
+    case "file":
+      // LINE can't send files from an OA, so the user gets a download link.
+      return {
+        line: {
+          type: "text",
+          text: `📎 ${content.fileName} (${formatBytes(content.fileSize)})\n${content.url}`,
+        },
+        row: { type: "file", text: content.fileName, mediaUrl: content.url, fileSize: content.fileSize },
+      };
+  }
+}
+
 /**
- * Sends a text to a LINE user.
+ * Sends text, an image or a file link to a LINE user.
  *
  * Uses the free Reply API when the user wrote within the last ~50 seconds,
  * otherwise the Push API (counts toward the monthly message quota).
  */
-export async function sendText(userId: string, text: string) {
+export async function sendMessage(userId: string, content: OutgoingContent) {
   const db = await getDb();
   const contact = await getContact(userId);
   if (!contact) throw new NotFoundError("Unknown LINE user");
 
-  const lineMessages: messagingApi.Message[] = [{ type: "text", text }];
+  const { line, row } = toLine(content);
+  const lineMessages: messagingApi.Message[] = [line];
   let status: "sent" | "failed" = "sent";
   let delivery: "reply" | "push" | null = null;
   let error: string | null = null;
@@ -167,8 +204,7 @@ export async function sendText(userId: string, text: string) {
     .values({
       userId,
       direction: "out",
-      type: "text",
-      text,
+      ...row,
       lineMessageId,
       status,
       delivery,
@@ -181,7 +217,7 @@ export async function sendText(userId: string, text: string) {
       .update(contacts)
       .set({
         lastMessageAt: saved.createdAt,
-        lastMessagePreview: `You: ${preview("text", text)}`,
+        lastMessagePreview: `You: ${preview(row.type, row.text)}`,
       })
       .where(eq(contacts.userId, userId));
   }

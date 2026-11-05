@@ -59,6 +59,12 @@ export const messages = pgTable(
     lineMessageId: text("line_message_id").unique(),
     stickerPackageId: text("sticker_package_id"),
     stickerId: text("sticker_id"),
+    /** Outgoing image/file: public URL in our Blob store (incoming media is proxied via lineMessageId). */
+    mediaUrl: text("media_url"),
+    /** Outgoing image: small preview LINE shows in the chat (max 1 MB). */
+    previewUrl: text("preview_url"),
+    /** Outgoing file: size in bytes (the file name goes in `text`). */
+    fileSize: integer("file_size"),
     status: text("status", { enum: ["received", "sent", "failed"] }).notNull(),
     /** Outgoing only: which LINE API delivered it. "reply" is free, "push" uses quota. */
     delivery: text("delivery", { enum: ["reply", "push"] }),

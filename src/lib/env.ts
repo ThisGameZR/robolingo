@@ -21,6 +21,11 @@ const schema = z.object({
   APP_PASSWORD: z.string().min(8, "should be at least 8 characters").optional(),
   DATABASE_URL: z.url().optional(),
   LINE_API_BASE_URL: z.url().optional(),
+  /** Vercel Blob store for images/files the operator sends. Optional: without it, attachments are disabled. */
+  BLOB_READ_WRITE_TOKEN: z
+    .string()
+    .regex(/^vercel_blob_rw_[A-Za-z0-9]+_[A-Za-z0-9]+$/, "doesn't look like a Vercel Blob read-write token")
+    .optional(),
 });
 
 export type Env = z.infer<typeof schema>;

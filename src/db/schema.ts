@@ -72,5 +72,12 @@ export const messages = pgTable(
   (t) => [index("messages_user_created_idx").on(t.userId, t.createdAt)],
 );
 
+/** Fixed-window counters (e.g. login attempts per IP). Shared across serverless instances. */
+export const rateLimits = pgTable("rate_limits", {
+  key: text("key").primaryKey(),
+  windowStart: timestamp("window_start", { withTimezone: true }).notNull(),
+  count: integer("count").notNull(),
+});
+
 export type Contact = typeof contacts.$inferSelect;
 export type Message = typeof messages.$inferSelect;

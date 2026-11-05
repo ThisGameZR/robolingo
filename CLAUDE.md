@@ -15,7 +15,8 @@ Requirements from the brief: Next.js + TypeScript, send to and receive from the 
 ## Layout
 - `src/app/api/line/webhook/route.ts`: LINE webhook (raw-body signature check, then `handleWebhookEvent`; 500 if any event fails)
 - `src/app/api/contacts/**`: list users, get/send messages, mark as read, typing indicator
-- `src/app/api/media/[messageId]`: streams image/video/file content from LINE
+- `src/app/api/media/[messageId]`: streams image/video/file content from LINE (incoming media)
+- `src/app/api/uploads` + `src/lib/media.ts` + `src/lib/attachments-client.ts`: outgoing attachments (browser uploads straight to Vercel Blob; send API only accepts URLs in our store)
 - `src/app/api/auth/*`, `src/lib/auth.ts`, `src/proxy.ts`: password gate (`APP_PASSWORD`, HMAC cookie); `src/lib/rate-limit.ts`: Postgres rate limiter
 - `src/lib/chat.ts`: all domain logic and database access; `src/lib/line.ts`: LINE client and error helpers
 - `src/lib/env.ts` + `src/instrumentation.ts`: zod-validated env; production refuses to boot without the required vars

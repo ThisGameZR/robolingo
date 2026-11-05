@@ -31,6 +31,7 @@ An operator inbox for a **LINE Official Account**. When LINE users message the O
 - **Typing indicator:** while the operator types, the user sees LINE's "..." animation
 - **Unsend:** when a user unsends a message, its content is removed here too
 - **Rich content:** stickers and images inline; video, audio, file and location
+- **Send images and files:** use 📎 or paste a screenshot. Images are resized in the browser (which also strips GPS/EXIF data) and sent as real LINE image messages. Files go out as a download link, because LINE doesn't let an OA send files. [ADR 0006](docs/adr/0006-direct-uploads-to-blob.md)
 - **Block detection:** shows when a user has blocked the OA
 - **Reliable webhook:** idempotent processing, so LINE's retries are safe. [ADR 0003](docs/adr/0003-idempotent-webhook.md)
 - **Security:** password gate, rate-limited login, strict security headers, and no LINE tokens ever sent to the browser
@@ -82,6 +83,7 @@ sequenceDiagram
 | `src/lib/line.ts` | LINE client and error helpers |
 | `src/lib/auth.ts`, `src/proxy.ts` | Password gate (HMAC session cookie). The proxy redirects; each route also checks. |
 | `src/lib/rate-limit.ts` | Postgres-backed fixed-window rate limiter |
+| `src/app/api/uploads/route.ts`, `src/lib/media.ts` | Short-lived upload tokens for Vercel Blob, plus attachment rules (types, sizes, our-store-only URLs) |
 | `src/lib/env.ts`, `src/instrumentation.ts` | Validated config; production refuses to boot when misconfigured |
 | `src/components/Inbox.tsx` | The UI (client component, polling) |
 | `src/db/schema.ts`, `drizzle/` | Schema and versioned SQL migrations |
@@ -98,6 +100,7 @@ The full reasoning is in [`docs/adr/`](docs/adr). In short:
 | [Idempotent webhook, retries allowed](docs/adr/0003-idempotent-webhook.md) | No message lost when the DB hiccups | Every handler must be safe to run twice. Tests enforce this. |
 | [Postgres everywhere (Neon / PGlite)](docs/adr/0004-postgres-everywhere.md) | The same SQL runs in production, local dev and tests | PGlite cold start (~1 s) in dev and tests |
 | [One shared password](docs/adr/0005-shared-password-gate.md) | It's enough for a single-team inbox and has nothing to manage | No per-operator audit trail yet |
+| [Browser uploads directly to Blob](docs/adr/0006-direct-uploads-to-blob.md) | Vercel functions accept at most 4.5 MB per request; LINE allows 10 MB images | Uploaded files are public (unguessable URLs), because LINE must be able to fetch them |
 
 ### Correctness details worth knowing
 - **Raw-body signature check:** the signature is computed over the exact bytes LINE sent, before any JSON parsing.
@@ -113,13 +116,14 @@ The full reasoning is in [`docs/adr/`](docs/adr). In short:
 - **Defense in depth:** `proxy.ts` redirects signed-out users, and every API route still checks the session itself.
 - **Brute force:** at most 10 login attempts per IP per 15 minutes. The counters live in Postgres because serverless instances don't share memory.
 - **Secrets stay server-side:** reply and read tokens are excluded from API responses (tested). The channel access token is only used server-side, including the image proxy.
+- **Attachments:** upload tokens go only to signed-in operators, expire in 10 minutes, and are limited by type and size. The send API only accepts URLs from *our* Blob store under `uploads/`, so it can't be used to make the OA send arbitrary links (tested).
 - **Headers:** CSP (`frame-ancestors 'none'`, images limited to our origin and LINE's CDN), HSTS, `nosniff`, `Referrer-Policy`, `Permissions-Policy`. No nonce, so pages can still be prerendered (see `next.config.ts`).
 - **Configuration:** `zod`-validated environment. A malformed Channel secret or a missing key stops a production instance at start-up with a message saying what to fix.
 
 ## Testing
 
 ```bash
-pnpm test        # 28 integration tests, about 2 s
+pnpm test        # 40 integration tests, about 3 s
 ```
 
 The tests call the real route handlers and domain code against a real Postgres engine (PGlite running in memory, same migrations as production), with the LINE SDK mocked. They cover:
@@ -175,7 +179,7 @@ pnpm dev                     # http://localhost:3000
    - In OA Manager → Response settings, turn **Webhooks on**, and turn **Auto-response** and **Greeting message off**.
 2. **Vercel:**
    - Import the repo.
-   - **Storage → Neon** sets `DATABASE_URL`.
+   - **Storage → Neon** sets `DATABASE_URL`. **Storage → Blob** (public) sets `BLOB_READ_WRITE_TOKEN` for attachments.
    - Add `LINE_CHANNEL_SECRET`, `LINE_CHANNEL_ACCESS_TOKEN` and `APP_PASSWORD`, then deploy. Migrations run in `vercel-build`.
    - `vercel.json` pins functions to `sin1`, next to the database.
 3. **Webhook:**
@@ -192,4 +196,5 @@ pnpm dev                     # http://localhost:3000
 | `LINE_CHANNEL_ACCESS_TOKEN` | production | LINE API calls (reply, push, profile, content, read, typing) |
 | `APP_PASSWORD` | production | Webchat password (8+ characters). Without it, the app stays locked. |
 | `DATABASE_URL` | on Vercel | Neon Postgres. Local dev and tests use PGlite. |
+| `BLOB_READ_WRITE_TOKEN` | for attachments | Vercel Blob store (set automatically when you connect a Blob store) |
 | `LINE_API_BASE_URL` | no | Sends LINE API calls to a mock server (testing) |

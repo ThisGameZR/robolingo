@@ -57,6 +57,20 @@ describe("delivery: Reply API first, Push as fallback", () => {
     expect(results.map((m) => m.delivery).sort()).toEqual(["push", "reply"]);
   });
 
+  it("keeps a fresh token even if LINE's clock is behind ours", async () => {
+    await userWrites("first", { replyToken: "tok-1" });
+    await sendText(USER, "our reply"); // stamped with the server clock
+    // The user answers right away, but LINE's event time is 2s behind our clock.
+    await userWrites("answer", { replyToken: "tok-2", timestamp: Date.now() - 2000 });
+
+    const msg = await sendText(USER, "thanks!");
+
+    expect(line.replyMessage).toHaveBeenLastCalledWith(
+      expect.objectContaining({ replyToken: "tok-2" }),
+    );
+    expect(msg.delivery).toBe("reply");
+  });
+
   it("pushes when the token is too old to trust", async () => {
     await userWrites("hi", { replyToken: "tok-1" });
     await ageReplyToken(55);

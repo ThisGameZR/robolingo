@@ -96,12 +96,13 @@ export function mockLine() {
       displayName: `Name of ${userId.slice(0, 5)}`,
       pictureUrl: "https://profile.line-scdn.net/p",
     })),
+    // Real LINE message ids are unique; so are the mock's.
     pushMessage: vi
       .spyOn(client, "pushMessage")
-      .mockResolvedValue({ sentMessages: [{ id: "push-1", quoteToken: "q" }] }),
+      .mockImplementation(async () => ({ sentMessages: [{ id: `push-${seq++}`, quoteToken: "q" }] })),
     replyMessage: vi
       .spyOn(client, "replyMessage")
-      .mockResolvedValue({ sentMessages: [{ id: "reply-1", quoteToken: "q" }] }),
+      .mockImplementation(async () => ({ sentMessages: [{ id: `reply-${seq++}`, quoteToken: "q" }] })),
     markMessagesAsReadByToken: vi
       .spyOn(client, "markMessagesAsReadByToken")
       .mockResolvedValue({}),

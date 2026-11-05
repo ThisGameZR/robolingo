@@ -380,7 +380,7 @@ async function saveIncomingMessage(userId: string, event: webhook.MessageEvent) 
   const markAsReadToken =
     "markAsReadToken" in m && typeof m.markAsReadToken === "string" ? m.markAsReadToken : null;
 
-  // Don't move "last message" (or the tokens) backwards if events arrive out of order.
+  // Don't move "last message" backwards if events arrive out of order.
   const isNewest = sql`(${contacts.lastMessageAt} is null or ${contacts.lastMessageAt} <= ${createdAt.toISOString()}::timestamptz)`;
   await db
     .update(contacts)
@@ -388,13 +388,12 @@ async function saveIncomingMessage(userId: string, event: webhook.MessageEvent) 
       unreadCount: sql`${contacts.unreadCount} + 1`,
       lastMessageAt: sql`case when ${isNewest} then ${createdAt.toISOString()}::timestamptz else ${contacts.lastMessageAt} end`,
       lastMessagePreview: sql`case when ${isNewest} then ${preview(m.type, text)} else ${contacts.lastMessagePreview} end`,
-      ...(replyToken && {
-        replyToken: sql`case when ${isNewest} then ${replyToken} else ${contacts.replyToken} end`,
-        replyTokenReceivedAt: sql`case when ${isNewest} then now() else ${contacts.replyTokenReceivedAt} end`,
-      }),
-      ...(markAsReadToken && {
-        markAsReadToken: sql`case when ${isNewest} then ${markAsReadToken} else ${contacts.markAsReadToken} end`,
-      }),
+      // Tokens are kept by arrival order, not compared with lastMessageAt: that
+      // may be our own reply's time (server clock) while event times come from
+      // LINE's clock, so a little skew would wrongly discard a fresh token.
+      // Any token is valid for a minute after it arrives, so "latest arrived" is right.
+      ...(replyToken && { replyToken, replyTokenReceivedAt: sql`now()` }),
+      ...(markAsReadToken && { markAsReadToken }),
     })
     .where(eq(contacts.userId, userId));
 }

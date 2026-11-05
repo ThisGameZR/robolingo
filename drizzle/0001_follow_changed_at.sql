@@ -1,0 +1,1 @@
+ALTER TABLE "contacts" ADD COLUMN "follow_changed_at" timestamp with time zone;

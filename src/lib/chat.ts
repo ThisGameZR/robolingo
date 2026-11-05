@@ -1,6 +1,6 @@
 import "server-only";
 import { randomUUID } from "node:crypto";
-import { desc, eq, sql } from "drizzle-orm";
+import { and, desc, eq, isNull, lte, or, sql } from "drizzle-orm";
 import type { webhook } from "@line/bot-sdk";
 import { getDb, schema } from "@/db";
 import { describeLineError, lineClient } from "./line";
@@ -114,15 +114,18 @@ export async function handleWebhookEvent(event: webhook.Event) {
   if (event.source?.type !== "user" || !event.source.userId) return;
   const userId = event.source.userId;
 
+  const at = new Date(event.timestamp);
+
   switch (event.type) {
     case "follow":
-      await upsertContact(userId, { isFollowing: true, forceProfile: true });
+      await upsertContact(userId, { forceProfile: true });
+      await setFollowing(userId, true, at);
       return;
     case "unfollow":
-      await setFollowing(userId, false);
+      await setFollowing(userId, false, at);
       return;
     case "message":
-      await upsertContact(userId, { isFollowing: true });
+      await upsertContact(userId);
       await saveIncomingMessage(userId, event);
       return;
     default:
@@ -130,10 +133,7 @@ export async function handleWebhookEvent(event: webhook.Event) {
   }
 }
 
-async function upsertContact(
-  userId: string,
-  opts: { isFollowing: boolean; forceProfile?: boolean },
-) {
+async function upsertContact(userId: string, opts: { forceProfile?: boolean } = {}) {
   const db = await getDb();
   const existing = await getContact(userId);
 
@@ -161,34 +161,40 @@ async function upsertContact(
         pictureUrl: profile?.pictureUrl ?? null,
         statusMessage: profile?.statusMessage ?? null,
         language: profile?.language ?? null,
-        isFollowing: opts.isFollowing,
         profileFetchedAt: profile ? new Date() : null,
       })
       .onConflictDoNothing();
     return;
   }
 
+  if (!profile) return;
   await db
     .update(contacts)
     .set({
-      isFollowing: opts.isFollowing,
-      ...(profile && {
-        displayName: profile.displayName,
-        pictureUrl: profile.pictureUrl ?? null,
-        statusMessage: profile.statusMessage ?? null,
-        language: profile.language ?? null,
-        profileFetchedAt: new Date(),
-      }),
+      displayName: profile.displayName,
+      pictureUrl: profile.pictureUrl ?? null,
+      statusMessage: profile.statusMessage ?? null,
+      language: profile.language ?? null,
+      profileFetchedAt: new Date(),
     })
     .where(eq(contacts.userId, userId));
 }
 
-async function setFollowing(userId: string, isFollowing: boolean) {
+/**
+ * Applies a follow/unfollow only if it's newer than the last one applied,
+ * so a redelivered old "follow" can't undo a later "unfollow".
+ */
+async function setFollowing(userId: string, isFollowing: boolean, at: Date) {
   const db = await getDb();
   await db
     .update(contacts)
-    .set({ isFollowing })
-    .where(eq(contacts.userId, userId));
+    .set({ isFollowing, followChangedAt: at })
+    .where(
+      and(
+        eq(contacts.userId, userId),
+        or(isNull(contacts.followChangedAt), lte(contacts.followChangedAt, at)),
+      ),
+    );
 }
 
 async function saveIncomingMessage(userId: string, event: webhook.MessageEvent) {

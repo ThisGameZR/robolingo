@@ -16,6 +16,8 @@ export const contacts = pgTable("contacts", {
   statusMessage: text("status_message"),
   language: text("language"),
   isFollowing: boolean("is_following").notNull().default(true),
+  /** Timestamp of the follow/unfollow event that set isFollowing (guards against out-of-order redelivery). */
+  followChangedAt: timestamp("follow_changed_at", { withTimezone: true }),
   unreadCount: integer("unread_count").notNull().default(0),
   lastMessageAt: timestamp("last_message_at", { withTimezone: true }),
   lastMessagePreview: text("last_message_preview"),

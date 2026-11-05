@@ -1,3 +1,4 @@
+import { requireAuth } from "@/lib/auth";
 import { NotFoundError, getContact, listMessages, sendText } from "@/lib/chat";
 
 /** LINE's limit for a single text message. */
@@ -8,6 +9,9 @@ export async function GET(
   request: Request,
   ctx: RouteContext<"/api/contacts/[userId]/messages">,
 ) {
+  const denied = await requireAuth(request);
+  if (denied) return denied;
+
   const { userId } = await ctx.params;
   const contact = await getContact(userId);
   if (!contact) {
@@ -21,6 +25,9 @@ export async function POST(
   request: Request,
   ctx: RouteContext<"/api/contacts/[userId]/messages">,
 ) {
+  const denied = await requireAuth(request);
+  if (denied) return denied;
+
   const { userId } = await ctx.params;
   const body = (await request.json().catch(() => null)) as { text?: unknown } | null;
   const text = typeof body?.text === "string" ? body.text.trim() : "";

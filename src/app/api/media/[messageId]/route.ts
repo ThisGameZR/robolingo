@@ -1,3 +1,4 @@
+import { requireAuth } from "@/lib/auth";
 import { fetchMessageContent } from "@/lib/line";
 
 /**
@@ -8,6 +9,9 @@ export async function GET(
   request: Request,
   ctx: RouteContext<"/api/media/[messageId]">,
 ) {
+  const denied = await requireAuth(request);
+  if (denied) return denied;
+
   const { messageId } = await ctx.params;
   if (!/^\d+$/.test(messageId)) {
     return Response.json({ error: "Invalid message id" }, { status: 400 });

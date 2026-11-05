@@ -9,6 +9,8 @@
  * signs everyone out. No database table is needed.
  */
 
+import { env } from "./env";
+
 export const SESSION_COOKIE = "robolingo_session";
 export const SESSION_MAX_AGE = 60 * 60 * 24 * 30; // 30 days
 
@@ -17,7 +19,7 @@ const LABEL = "robolingo-session-v1";
 export type GateMode = "open" | "password" | "misconfigured";
 
 export function gateMode(): GateMode {
-  if (process.env.APP_PASSWORD) return "password";
+  if (env().APP_PASSWORD) return "password";
   return process.env.NODE_ENV === "production" ? "misconfigured" : "open";
 }
 
@@ -43,11 +45,11 @@ function timingSafeEqual(a: string, b: string): boolean {
 
 /** Token stored in the cookie after a successful login. */
 export async function sessionToken(): Promise<string> {
-  return hmacHex(process.env.APP_PASSWORD ?? "", LABEL);
+  return hmacHex(env().APP_PASSWORD ?? "", LABEL);
 }
 
 export async function checkPassword(candidate: string): Promise<boolean> {
-  const expected = process.env.APP_PASSWORD;
+  const expected = env().APP_PASSWORD;
   if (!expected) return false;
   // Compare HMACs so the comparison takes the same time whatever the length.
   const [a, b] = await Promise.all([hmacHex(candidate, LABEL), hmacHex(expected, LABEL)]);

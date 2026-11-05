@@ -3,6 +3,7 @@ import { mkdirSync } from "node:fs";
 import path from "node:path";
 import { neon } from "@neondatabase/serverless";
 import { drizzle as drizzleNeon, type NeonHttpDatabase } from "drizzle-orm/neon-http";
+import { env } from "@/lib/env";
 import * as schema from "./schema";
 
 export type Db = NeonHttpDatabase<typeof schema>;
@@ -26,7 +27,7 @@ export function getDb(): Promise<Db> {
 }
 
 async function createDb(): Promise<Db> {
-  const url = process.env.DATABASE_URL;
+  const url = env().DATABASE_URL;
   if (url) {
     return drizzleNeon(neon(url), { schema });
   }

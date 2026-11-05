@@ -13,7 +13,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Robolingo",
+  title: "Robolingo · LINE OA Webchat",
+  description: "Webchat for replying to LINE Official Account users",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {

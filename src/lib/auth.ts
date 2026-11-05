@@ -51,8 +51,9 @@ export async function sessionToken(): Promise<string> {
 export async function checkPassword(candidate: string): Promise<boolean> {
   const expected = env().APP_PASSWORD;
   if (!expected) return false;
-  // Compare HMACs so the comparison takes the same time whatever the length.
-  const [a, b] = await Promise.all([hmacHex(candidate, LABEL), hmacHex(expected, LABEL)]);
+  // Compare fixed-length HMACs so timing doesn't depend on the input. The
+  // password is the message, not the key: WebCrypto rejects empty keys.
+  const [a, b] = await Promise.all([hmacHex(LABEL, candidate), hmacHex(LABEL, expected)]);
   return timingSafeEqual(a, b);
 }
 

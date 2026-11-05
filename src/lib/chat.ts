@@ -1,4 +1,5 @@
 import "server-only";
+import { randomUUID } from "node:crypto";
 import { desc, eq, sql } from "drizzle-orm";
 import type { webhook } from "@line/bot-sdk";
 import { getDb, schema } from "@/db";
@@ -52,6 +53,57 @@ export async function markRead(userId: string) {
     .set({ unreadCount: 0 })
     .where(eq(contacts.userId, userId));
 }
+
+// ---------------------------------------------------------------------------
+// Sending from the webchat
+// ---------------------------------------------------------------------------
+
+export async function sendText(userId: string, text: string) {
+  const db = await getDb();
+  const contact = await getContact(userId);
+  if (!contact) throw new NotFoundError("Unknown LINE user");
+
+  let status: "sent" | "failed" = "sent";
+  let error: string | null = null;
+  let lineMessageId: string | null = null;
+  try {
+    const res = await lineClient().pushMessage(
+      { to: userId, messages: [{ type: "text", text }] },
+      // Retry key: lets LINE de-duplicate if this request is retried.
+      randomUUID(),
+    );
+    lineMessageId = res.sentMessages?.[0]?.id ?? null;
+  } catch (err) {
+    status = "failed";
+    error = describeLineError(err);
+  }
+
+  const [saved] = await db
+    .insert(messages)
+    .values({
+      userId,
+      direction: "out",
+      type: "text",
+      text,
+      lineMessageId,
+      status,
+      error,
+    })
+    .returning();
+
+  if (status === "sent") {
+    await db
+      .update(contacts)
+      .set({
+        lastMessageAt: saved.createdAt,
+        lastMessagePreview: `You: ${preview("text", text)}`,
+      })
+      .where(eq(contacts.userId, userId));
+  }
+  return saved;
+}
+
+export class NotFoundError extends Error {}
 
 // ---------------------------------------------------------------------------
 // Webhook processing (LINE -> us)

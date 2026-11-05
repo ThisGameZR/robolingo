@@ -22,6 +22,13 @@ export const contacts = pgTable("contacts", {
   lastMessageAt: timestamp("last_message_at", { withTimezone: true }),
   lastMessagePreview: text("last_message_preview"),
   profileFetchedAt: timestamp("profile_fetched_at", { withTimezone: true }),
+  /**
+   * Latest unused reply token from this user's messages. Replying with it is free
+   * (Push messages count toward the monthly quota), but it's single-use and only
+   * valid for about a minute after the webhook arrives.
+   */
+  replyToken: text("reply_token"),
+  replyTokenReceivedAt: timestamp("reply_token_received_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true })
     .notNull()
     .defaultNow(),
@@ -48,6 +55,8 @@ export const messages = pgTable(
     stickerPackageId: text("sticker_package_id"),
     stickerId: text("sticker_id"),
     status: text("status", { enum: ["received", "sent", "failed"] }).notNull(),
+    /** Outgoing only: which LINE API delivered it. "reply" is free, "push" uses quota. */
+    delivery: text("delivery", { enum: ["reply", "push"] }),
     error: text("error"),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()

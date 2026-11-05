@@ -38,6 +38,15 @@ export function fetchMessageContent(messageId: string): Promise<Response> {
   );
 }
 
+/** HTTP status of a failed LINE API call, or undefined for network errors. */
+export function lineErrorStatus(err: unknown): number | undefined {
+  if (err && typeof err === "object" && "status" in err) {
+    const status = (err as { status?: unknown }).status;
+    if (typeof status === "number") return status;
+  }
+  return undefined;
+}
+
 /** Turns a LINE API error into a short message the UI can show. */
 export function describeLineError(err: unknown): string {
   if (err && typeof err === "object" && "body" in err) {

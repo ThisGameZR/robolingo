@@ -25,6 +25,7 @@ type Message = {
   stickerPackageId: string | null;
   stickerId: string | null;
   status: "received" | "sent" | "failed";
+  delivery: "reply" | "push" | null;
   error: string | null;
   createdAt: string;
   /** Client-only: message shown before the server confirms it. */
@@ -273,6 +274,7 @@ function Conversation({
       stickerPackageId: null,
       stickerId: null,
       status: "sent",
+      delivery: null,
       error: null,
       createdAt: new Date().toISOString(),
       pending: true,
@@ -407,7 +409,22 @@ function Bubble({ message: m, contact }: { message: Message; contact: Contact })
               Not delivered{m.error ? `: ${m.error}` : ""}
             </span>
           ) : (
-            time
+            <>
+              {time}
+              {m.delivery && (
+                <span
+                  className={m.delivery === "reply" ? "text-emerald-600" : "text-slate-400"}
+                  title={
+                    m.delivery === "reply"
+                      ? "Sent with the Reply API: free, doesn't use the monthly message quota"
+                      : "Sent with the Push API: counts toward the monthly message quota"
+                  }
+                >
+                  {" · "}
+                  {m.delivery === "reply" ? "Reply (free)" : "Push"}
+                </span>
+              )}
+            </>
           )}
         </span>
       </div>

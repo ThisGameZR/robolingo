@@ -1,9 +1,9 @@
 import "server-only";
 import { randomUUID } from "node:crypto";
-import { and, desc, eq, isNull, lte, or, sql } from "drizzle-orm";
-import type { webhook } from "@line/bot-sdk";
+import { and, desc, eq, getTableColumns, isNull, lte, or, sql } from "drizzle-orm";
+import type { messagingApi, webhook } from "@line/bot-sdk";
 import { getDb, schema } from "@/db";
-import { describeLineError, lineClient } from "./line";
+import { describeLineError, lineClient, lineErrorStatus } from "./line";
 
 const { contacts, messages } = schema;
 
@@ -14,10 +14,22 @@ const PROFILE_TTL_MS = 6 * 60 * 60 * 1000;
 // Reads used by the webchat
 // ---------------------------------------------------------------------------
 
+function omit<T extends object, K extends keyof T>(obj: T, keys: readonly K[]): Omit<T, K> {
+  const copy = { ...obj };
+  for (const key of keys) delete copy[key];
+  return copy;
+}
+
+/** Contact fields safe to send to the browser (reply tokens stay server-side). */
+const publicContactColumns = omit(getTableColumns(contacts), [
+  "replyToken",
+  "replyTokenReceivedAt",
+]);
+
 export async function listContacts() {
   const db = await getDb();
   return db
-    .select()
+    .select(publicContactColumns)
     .from(contacts)
     .orderBy(
       sql`${contacts.lastMessageAt} desc nulls last`,
@@ -28,7 +40,7 @@ export async function listContacts() {
 export async function getContact(userId: string) {
   const db = await getDb();
   const [row] = await db
-    .select()
+    .select(publicContactColumns)
     .from(contacts)
     .where(eq(contacts.userId, userId));
   return row;
@@ -58,24 +70,61 @@ export async function markRead(userId: string) {
 // Sending from the webchat
 // ---------------------------------------------------------------------------
 
+/**
+ * LINE documents reply tokens as valid for one minute after the webhook is
+ * received, and warns not to rely on the exact limit. Leave a safety margin.
+ */
+const REPLY_TOKEN_TTL_SECONDS = 50;
+
+/** LINE stops honouring reply tokens 20 minutes after the event, even on redelivery. */
+const REPLY_TOKEN_MAX_EVENT_AGE_MS = 20 * 60 * 1000;
+
+/**
+ * Sends a text to a LINE user.
+ *
+ * Uses the free Reply API when the user wrote within the last ~50 seconds,
+ * otherwise the Push API (counts toward the monthly message quota).
+ */
 export async function sendText(userId: string, text: string) {
   const db = await getDb();
   const contact = await getContact(userId);
   if (!contact) throw new NotFoundError("Unknown LINE user");
 
+  const lineMessages: messagingApi.Message[] = [{ type: "text", text }];
   let status: "sent" | "failed" = "sent";
+  let delivery: "reply" | "push" | null = null;
   let error: string | null = null;
   let lineMessageId: string | null = null;
-  try {
-    const res = await lineClient().pushMessage(
-      { to: userId, messages: [{ type: "text", text }] },
-      // Retry key: lets LINE de-duplicate if this request is retried.
-      randomUUID(),
-    );
-    lineMessageId = res.sentMessages?.[0]?.id ?? null;
-  } catch (err) {
-    status = "failed";
-    error = describeLineError(err);
+
+  const replyToken = await claimReplyToken(userId);
+  if (replyToken) {
+    try {
+      const res = await lineClient().replyMessage({ replyToken, messages: lineMessages });
+      lineMessageId = res.sentMessages?.[0]?.id ?? null;
+      delivery = "reply";
+    } catch (err) {
+      // 400 = token expired or already used: nothing was delivered, so Push is safe.
+      // Anything else (timeout, 5xx) might have been delivered; don't risk sending twice.
+      if (lineErrorStatus(err) !== 400) {
+        status = "failed";
+        error = describeLineError(err);
+      }
+    }
+  }
+
+  if (status === "sent" && !delivery) {
+    try {
+      const res = await lineClient().pushMessage(
+        { to: userId, messages: lineMessages },
+        // Retry key: LINE de-duplicates if this exact request is retried.
+        randomUUID(),
+      );
+      lineMessageId = res.sentMessages?.[0]?.id ?? null;
+      delivery = "push";
+    } catch (err) {
+      status = "failed";
+      error = describeLineError(err);
+    }
   }
 
   const [saved] = await db
@@ -87,6 +136,7 @@ export async function sendText(userId: string, text: string) {
       text,
       lineMessageId,
       status,
+      delivery,
       error,
     })
     .returning();
@@ -104,6 +154,30 @@ export async function sendText(userId: string, text: string) {
 }
 
 export class NotFoundError extends Error {}
+
+/**
+ * Atomically takes the user's reply token if it's still fresh, and clears it so
+ * two operators replying at once can't both use it (tokens are single-use).
+ */
+async function claimReplyToken(userId: string): Promise<string | null> {
+  const db = await getDb();
+  const res = await db.execute<{ reply_token: string }>(sql`
+    with claimed as (
+      select ${contacts.userId}, ${contacts.replyToken}
+      from ${contacts}
+      where ${contacts.userId} = ${userId}
+        and ${contacts.replyToken} is not null
+        and ${contacts.replyTokenReceivedAt} > now() - make_interval(secs => ${REPLY_TOKEN_TTL_SECONDS})
+      for update
+    )
+    update ${contacts}
+    set reply_token = null, reply_token_received_at = null
+    from claimed
+    where ${contacts.userId} = claimed.user_id
+    returning claimed.reply_token
+  `);
+  return res.rows[0]?.reply_token ?? null;
+}
 
 // ---------------------------------------------------------------------------
 // Webhook processing (LINE -> us)
@@ -242,7 +316,13 @@ async function saveIncomingMessage(userId: string, event: webhook.MessageEvent) 
 
   if (inserted.length === 0) return;
 
-  // Don't move "last message" backwards if events arrive out of order.
+  // Keep the reply token from the newest message so the next reply can be free.
+  const replyToken =
+    event.replyToken && Date.now() - event.timestamp < REPLY_TOKEN_MAX_EVENT_AGE_MS
+      ? event.replyToken
+      : null;
+
+  // Don't move "last message" (or the reply token) backwards if events arrive out of order.
   const isNewest = sql`(${contacts.lastMessageAt} is null or ${contacts.lastMessageAt} <= ${createdAt.toISOString()}::timestamptz)`;
   await db
     .update(contacts)
@@ -250,6 +330,10 @@ async function saveIncomingMessage(userId: string, event: webhook.MessageEvent) 
       unreadCount: sql`${contacts.unreadCount} + 1`,
       lastMessageAt: sql`case when ${isNewest} then ${createdAt.toISOString()}::timestamptz else ${contacts.lastMessageAt} end`,
       lastMessagePreview: sql`case when ${isNewest} then ${preview(m.type, text)} else ${contacts.lastMessagePreview} end`,
+      ...(replyToken && {
+        replyToken: sql`case when ${isNewest} then ${replyToken} else ${contacts.replyToken} end`,
+        replyTokenReceivedAt: sql`case when ${isNewest} then now() else ${contacts.replyTokenReceivedAt} end`,
+      }),
     })
     .where(eq(contacts.userId, userId));
 }

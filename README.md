@@ -1,89 +1,195 @@
 # Robolingo: LINE OA Webchat
 
-A webchat for a **LINE Official Account**. When LINE users message the OA, their messages show up here. You can see who each sender is (LINE name and profile picture), pick a user, and reply. The reply arrives in their LINE app as a message from the OA.
+[![CI](https://github.com/ThisGameZR/robolingo/actions/workflows/ci.yml/badge.svg)](https://github.com/ThisGameZR/robolingo/actions/workflows/ci.yml)
 
-Built with **Next.js 16 (App Router) + TypeScript**, Tailwind CSS, the official [`@line/bot-sdk`](https://github.com/line/line-bot-sdk-nodejs), Drizzle ORM and **Neon Postgres**. It's hosted on **Vercel**.
+An operator inbox for a **LINE Official Account**. When LINE users message the OA, their messages show up here with each sender's LINE name and picture. An operator picks a user and replies, and the reply arrives in the user's LINE app as a message from the OA.
+
+**Next.js 16 (App Router) · TypeScript · `@line/bot-sdk` · Drizzle ORM · Neon Postgres · Vercel**
+
+| | |
+| --- | --- |
+| **Webchat** | https://robolingo-bice.vercel.app (the password is in the submission) |
+| **LINE OA** | [Add @417avhgw as a friend](https://line.me/R/ti/p/@417avhgw), then send it a message |
+
+![Inbox](docs/screenshots/inbox-desktop.png)
+
+<p>
+  <img src="docs/screenshots/mobile-list.png" width="240" alt="User list on mobile">
+  <img src="docs/screenshots/mobile-chat.png" width="240" alt="Conversation on mobile">
+</p>
 
 ## Features
 
-- **Receive** messages from LINE through the Messaging API webhook. The LINE signature is checked on every request.
-- **See who's talking**: a user list with LINE display name, profile picture, last message, unread badge and search.
-- **Pick a user and reply**. Replies go out through the LINE Push API, and failed sends show the reason.
-- Text, stickers, images (shown inline), video/audio/file links and locations
-- Shows when a user has blocked the OA
-- Updates every few seconds while the tab is open
-- Password-protected, so a public URL doesn't expose users' chats
-- Works on mobile: the user list and the chat take turns on small screens
+**The brief**
+- **Receive** messages sent to the OA (LINE webhook, signature-verified)
+- **See who sent them**: LINE display name, profile picture, status, unread count, search
+- **Pick a user and reply** from the webchat
 
-## How it works
+**Beyond the brief**
+- **Cost-aware delivery:** replies go out through the free **Reply API** when the user wrote within the last minute, and fall back to the **Push API** (which counts toward the monthly quota) otherwise. Every message shows which one was used. [ADR 0002](docs/adr/0002-reply-api-first.md)
+- **Read receipts:** opening a conversation shows "Read" to the user in LINE
+- **Typing indicator:** while the operator types, the user sees LINE's "..." animation
+- **Unsend:** when a user unsends a message, its content is removed here too
+- **Rich content:** stickers and images inline; video, audio, file and location
+- **Block detection:** shows when a user has blocked the OA
+- **Reliable webhook:** idempotent processing, so LINE's retries are safe. [ADR 0003](docs/adr/0003-idempotent-webhook.md)
+- **Security:** password gate, rate-limited login, strict security headers, and no LINE tokens ever sent to the browser
+- **Mobile layout:** the user list and the chat take turns on small screens
 
+## Architecture
+
+```mermaid
+flowchart LR
+    U["LINE user"] <-->|chat| LP["LINE Platform"]
+    LP -->|"webhook (signed)"| WH["POST /api/line/webhook"]
+    subgraph Vercel["Vercel (sin1)"]
+        WH --> CORE["lib/chat.ts"]
+        API["/api/contacts/*"] --> CORE
+        PX["proxy.ts<br/>password gate"] -.-> API
+    end
+    CORE <--> DB[("Neon Postgres<br/>Singapore")]
+    CORE -->|"Reply / Push / profile / read / typing"| LP
+    OP["Operator browser"] -->|"poll every 2.5 s"| API
 ```
-LINE user ──message──▶ LINE Platform ──webhook──▶ POST /api/line/webhook ──▶ Postgres
-                                                     (signature check,
-                                                      fetch profile)
-Webchat (browser) ◀── checks every few seconds ── GET /api/contacts, /api/contacts/:id/messages
-Webchat (browser) ──reply──▶ POST /api/contacts/:id/messages ──Push API──▶ LINE user
+
+### Sending a reply
+
+```mermaid
+sequenceDiagram
+    participant O as Operator
+    participant A as API
+    participant D as Postgres
+    participant L as LINE
+    O->>A: POST /api/contacts/:id/messages
+    A->>D: claim reply token (atomic, single use, under 50 s old)
+    alt token claimed
+        A->>L: Reply API (free)
+        L-->>A: 400 = token expired
+        A->>L: fall back to Push API
+    else no fresh token
+        A->>L: Push API (counts toward quota, retry key set)
+    end
+    A->>D: save message + delivery method
+    A-->>O: 201 (or 502 with LINE's reason)
 ```
 
-| Path | What it does |
+### Code map
+
+| Path | Responsibility |
 | --- | --- |
-| `src/app/api/line/webhook/route.ts` | LINE webhook: checks the signature and saves users and messages |
-| `src/lib/chat.ts` | Reading and writing the database, sending through the Push API |
-| `src/lib/line.ts` | LINE API client |
-| `src/lib/auth.ts`, `src/proxy.ts` | Password gate |
-| `src/components/Inbox.tsx` | The webchat UI |
-| `src/db/schema.ts`, `drizzle/` | Database schema and migrations |
+| `src/app/api/line/webhook/route.ts` | Verifies the LINE signature on the raw body, then hands each event to `handleWebhookEvent` |
+| `src/lib/chat.ts` | Domain logic: contacts, messages, delivery strategy, read receipts, unsend |
+| `src/lib/line.ts` | LINE client and error helpers |
+| `src/lib/auth.ts`, `src/proxy.ts` | Password gate (HMAC session cookie). The proxy redirects; each route also checks. |
+| `src/lib/rate-limit.ts` | Postgres-backed fixed-window rate limiter |
+| `src/lib/env.ts`, `src/instrumentation.ts` | Validated config; production refuses to boot when misconfigured |
+| `src/components/Inbox.tsx` | The UI (client component, polling) |
+| `src/db/schema.ts`, `drizzle/` | Schema and versioned SQL migrations |
+| `test/` | Integration tests on a real Postgres engine (in-memory PGlite), with LINE mocked |
+
+## Design decisions
+
+The full reasoning is in [`docs/adr/`](docs/adr). In short:
+
+| Decision | Why | Trade-off accepted |
+| --- | --- | --- |
+| [Polling, not WebSockets](docs/adr/0001-polling-over-websockets.md) | Vercel functions can't hold connections open, and polling needs no extra service | Up to ~2.5 s delay, plus some idle requests. A managed pub/sub service is the upgrade path. |
+| [Reply API first, Push fallback](docs/adr/0002-reply-api-first.md) | Replies are free; push uses a quota of 300 messages a month on the free plan | Slightly more complex sending logic |
+| [Idempotent webhook, retries allowed](docs/adr/0003-idempotent-webhook.md) | No message lost when the DB hiccups | Every handler must be safe to run twice. Tests enforce this. |
+| [Postgres everywhere (Neon / PGlite)](docs/adr/0004-postgres-everywhere.md) | The same SQL runs in production, local dev and tests | PGlite cold start (~1 s) in dev and tests |
+| [One shared password](docs/adr/0005-shared-password-gate.md) | It's enough for a single-team inbox and has nothing to manage | No per-operator audit trail yet |
+
+### Correctness details worth knowing
+- **Raw-body signature check:** the signature is computed over the exact bytes LINE sent, before any JSON parsing.
+- **Duplicates:** LINE can redeliver webhooks. A unique `line_message_id` makes inserts no-ops on the second delivery.
+- **Ordering:** a late or redelivered `follow` can't override a newer `unfollow` (guarded by event timestamp). An out-of-order message can't replace the latest preview.
+- **Clock skew:** reply tokens are kept by *arrival* order. Comparing LINE's event time with our server's clock dropped fresh tokens, and a test now covers that case.
+- **Single-use tokens under concurrency:** the reply token is claimed with one `UPDATE … FROM (SELECT … FOR UPDATE) RETURNING`. Two operators replying at once never both use it, and a test runs both at the same time.
+- **No double sends:** after a Reply API **400** (token invalid), the message is sent again with Push. After an ambiguous failure (timeout or 5xx), it isn't resent, because it may already have been delivered.
+
+## Security
+
+- **Password gate:** HttpOnly, Secure, SameSite=Lax cookie containing an HMAC of the password, so changing the password signs everyone out. Comparisons take constant time. The app stays **locked** in production if `APP_PASSWORD` is missing.
+- **Defense in depth:** `proxy.ts` redirects signed-out users, and every API route still checks the session itself.
+- **Brute force:** at most 10 login attempts per IP per 15 minutes. The counters live in Postgres because serverless instances don't share memory.
+- **Secrets stay server-side:** reply and read tokens are excluded from API responses (tested). The channel access token is only used server-side, including the image proxy.
+- **Headers:** CSP (`frame-ancestors 'none'`, images limited to our origin and LINE's CDN), HSTS, `nosniff`, `Referrer-Policy`, `Permissions-Policy`. No nonce, so pages can still be prerendered (see `next.config.ts`).
+- **Configuration:** `zod`-validated environment. A malformed Channel secret or a missing key stops a production instance at start-up with a message saying what to fix.
+
+## Testing
+
+```bash
+pnpm test        # 28 integration tests, about 2 s
+```
+
+The tests call the real route handlers and domain code against a real Postgres engine (PGlite running in memory, same migrations as production), with the LINE SDK mocked. They cover:
+- signature rejection
+- duplicate and out-of-order delivery
+- retry safety
+- Reply→Push fallback rules, including a concurrent token claim and clock skew
+- read receipts and unsend
+- token leakage
+- auth, rate limiting and config validation
+
+CI (GitHub Actions) runs typecheck, lint, tests and a production build on every push.
+
+## Scaling path
+
+The current design is sized for one OA and a small team. Here's what I'd change as load grows:
+
+| When | Change |
+| --- | --- |
+| More operators online | Replace polling with pushed updates: Postgres `LISTEN/NOTIFY` → a pub/sub service (Ably, Pusher) or Server-Sent Events from a long-running service. Fetch messages incrementally (`?after=<id>`) instead of the last 200. |
+| Webhook bursts | Acknowledge right away and process through a queue (Vercel Queues / QStash), keeping the same idempotent handlers |
+| Several operators | Individual accounts (Auth.js / SSO), assigning conversations to operators, an audit log, roles |
+| Several OAs | A `channel_id` on every row, per-channel secrets in a secret manager, and the webhook routed by `destination` |
+| Data retention / PDPA | Retention policy for message content, export and delete per user, encryption at rest for content columns |
+| Observability | Structured logs → log drain, error tracking, alerts on webhook 5xx rate and push quota |
 
 ## Run locally
 
-You need Node.js 20+ and pnpm.
+Requires Node.js 20+ and pnpm.
 
 ```bash
 pnpm install
-cp .env.example .env.local   # fill in the LINE keys (optional to just open the UI)
-pnpm dev
+cp .env.example .env.local   # LINE keys are optional just to open the UI
+pnpm dev                     # http://localhost:3000
 ```
 
-Then open http://localhost:3000.
+- **Database:** none needed. Without `DATABASE_URL`, an embedded Postgres (PGlite) is used, with migrations applied automatically. Delete `node_modules/.cache/robolingo-pglite` to reset it.
+- **Login:** without `APP_PASSWORD`, the login screen is skipped in dev.
+- **Real LINE messages locally:** LINE can't reach `localhost`. Expose port 3000 with a tunnel (`ngrok http 3000`) and use `<tunnel>/api/line/webhook` as the webhook URL.
 
-- No database setup is needed locally. Without `DATABASE_URL`, the app uses an embedded Postgres (PGlite) stored in `node_modules/.cache/robolingo-pglite` (delete that folder to reset local data).
-- Without `APP_PASSWORD`, the login screen is skipped locally.
-- LINE can't reach `localhost`. To receive real LINE messages locally, expose port 3000 with a tunnel (`ngrok http 3000` or `cloudflared tunnel --url http://localhost:3000`) and set the tunnel URL plus `/api/line/webhook` as the webhook URL.
-
-Other scripts: `pnpm build`, `pnpm lint`, `pnpm typecheck`, `pnpm db:generate` (creates a migration after you edit `src/db/schema.ts`), `pnpm db:migrate`.
+| Script | |
+| --- | --- |
+| `pnpm test` / `pnpm test:watch` | Integration tests |
+| `pnpm typecheck` / `pnpm lint` | Static checks |
+| `pnpm db:generate` | Create a migration after editing `src/db/schema.ts` |
+| `pnpm db:migrate` | Apply migrations to `DATABASE_URL` (Vercel runs this during the build) |
 
 ## Deploy (LINE + Vercel + Neon)
 
-### 1. Create the LINE Official Account and Messaging API channel
-1. Create an OA at https://manager.line.biz.
-2. In OA Manager → **Settings → Messaging API**, click **Enable Messaging API** and choose or create a provider.
-3. In the [LINE Developers Console](https://developers.line.biz/console/), open the channel:
-   - **Basic settings** → copy the **Channel secret**.
-   - **Messaging API** → **Channel access token (long-lived)** → **Issue**, then copy it.
-4. In OA Manager → **Settings → Response settings**: turn **Webhooks** *on* and **Auto-response messages** / **Greeting message** *off*, so LINE doesn't answer before you do.
-
-### 2. Deploy to Vercel
-1. Push this repo to GitHub.
-2. At https://vercel.com/new, import the repo. Leave the framework as Next.js and keep the default build settings.
-3. In the project, go to **Storage → Create Database → Neon** and connect it to the project. This sets `DATABASE_URL`.
-4. **Settings → Environment Variables**: add `LINE_CHANNEL_SECRET`, `LINE_CHANNEL_ACCESS_TOKEN` and `APP_PASSWORD`.
-5. **Redeploy.** The build runs the database migrations automatically (the `vercel-build` script).
-
-### 3. Connect the webhook
-1. LINE Developers Console → **Messaging API** → **Webhook URL**: `https://<your-app>.vercel.app/api/line/webhook`
-2. Click **Verify**. It should say *Success*.
-3. Turn on **Use webhook**.
-4. Add the OA as a friend (QR code or `https://line.me/R/ti/p/@<basic-id>`), send it a message, and it appears in the webchat.
-
-### Free plan limits
-The LINE free plan includes about 300 push messages a month. Received messages are unlimited. Neon and Vercel free plans are more than enough for this.
+1. **LINE:**
+   - Create an OA at [manager.line.biz](https://manager.line.biz) and enable the Messaging API.
+   - In the [Developers Console](https://developers.line.biz/console/), copy the **Channel secret** and issue a **long-lived channel access token**.
+   - In OA Manager → Response settings, turn **Webhooks on**, and turn **Auto-response** and **Greeting message off**.
+2. **Vercel:**
+   - Import the repo.
+   - **Storage → Neon** sets `DATABASE_URL`.
+   - Add `LINE_CHANNEL_SECRET`, `LINE_CHANNEL_ACCESS_TOKEN` and `APP_PASSWORD`, then deploy. Migrations run in `vercel-build`.
+   - `vercel.json` pins functions to `sin1`, next to the database.
+3. **Webhook:**
+   - Set `https://<app>.vercel.app/api/line/webhook`.
+   - Click **Verify**, and turn **Use webhook** on.
+   - Optionally turn **Webhook redelivery** on, so LINE retries failed deliveries.
+4. **Deployment Protection:** keep it on for previews only, so LINE and users can reach production.
 
 ## Environment variables
 
 | Name | Required | Description |
 | --- | --- | --- |
-| `LINE_CHANNEL_SECRET` | yes | Checks that webhooks really come from LINE |
-| `LINE_CHANNEL_ACCESS_TOKEN` | yes | Calls the LINE API (push, profile, content) |
-| `APP_PASSWORD` | in production | Webchat login. Without it, the deployed app stays locked. |
-| `DATABASE_URL` | in production | Neon Postgres. Local dev falls back to PGlite. |
-| `LINE_API_BASE_URL` | no | Points LINE API calls at a mock server, for tests |
+| `LINE_CHANNEL_SECRET` | production | Verifies webhook signatures (32 hex characters) |
+| `LINE_CHANNEL_ACCESS_TOKEN` | production | LINE API calls (reply, push, profile, content, read, typing) |
+| `APP_PASSWORD` | production | Webchat password (8+ characters). Without it, the app stays locked. |
+| `DATABASE_URL` | on Vercel | Neon Postgres. Local dev and tests use PGlite. |
+| `LINE_API_BASE_URL` | no | Sends LINE API calls to a mock server (testing) |

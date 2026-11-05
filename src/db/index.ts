@@ -47,7 +47,8 @@ async function createDb(): Promise<Db> {
   const dataDir =
     process.env.PGLITE_DIR ||
     path.join(process.cwd(), "node_modules", ".cache", "robolingo-pglite");
-  mkdirSync(dataDir, { recursive: true }); // PGlite won't create parent folders
+  // PGlite won't create parent folders. "memory://" (used by tests) needs none.
+  if (!dataDir.startsWith("memory://")) mkdirSync(dataDir, { recursive: true });
   const client = new PGlite(dataDir);
   const db = drizzle(client, { schema });
   await migrate(db, { migrationsFolder: path.join(process.cwd(), "drizzle") });
